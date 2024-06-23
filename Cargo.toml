@@ -1,0 +1,9 @@
+[package]
+name = "formica"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+async-std = { version = "1.12.0", features = ["attributes"] }
+httparse = "1.9.4"
+regex = "1.10.5"
