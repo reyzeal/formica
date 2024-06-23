@@ -1,6 +1,4 @@
-use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
-use std::ops::Deref;
 
 use async_std::{io, task};
 use async_std::net::{TcpListener, TcpStream};
@@ -13,13 +11,12 @@ pub trait HttpHandler: FnMut(httparse::Request, Response) -> Response{}
 
 impl<T> HttpHandler for T where T: FnMut(httparse::Request, Response) -> Response{}
 
-type RouteHandler = Mutex<Box<dyn HttpHandler<Output=Response> + Send>>;
-type RouteMaps = BTreeMap<String, Arc<Mutex<HashMap<String, RouteHandler>>>>;
+type RouteHandler = Arc<Mutex<dyn HttpHandler<Output=Response> + Send>>;
+type RouteMaps = BTreeMap<String, RouteHandler>;
 
 pub struct Formica{
     addr: String,
-    routes: BTreeMap<String, Arc<Mutex<HashMap<String, RouteHandler>>>>
-    // main_thread: thread::JoinHandle<()>
+    routes: RouteMaps
 }
 #[derive(Debug)]
 pub struct Request{
@@ -65,7 +62,7 @@ impl Response{
         format!("HTTP/1.1 {} {}\r\n{}\r\n\r\n{}", self.code, "OK", headers, self.content)
     }
 }
-async fn on_connection(routes: RouteMaps, mut stream: TcpStream) -> io::Result<()> {
+async fn on_connection(routes: BTreeMap<String, RouteHandler>, mut stream: TcpStream) -> io::Result<()> {
     let mut buffer = [0u8; 512];
     loop {
 
@@ -79,21 +76,12 @@ async fn on_connection(routes: RouteMaps, mut stream: TcpStream) -> io::Result<(
                     match req.method {
                         None => {}
                         Some(method) => {
-                            match routes.get(path) {
-                                Some(route) => {
-                                    let route = route.clone();
-                                    let route = route.lock().await;
-                                    match route.get(method) {
-                                        None => {
-                                            stream.write(b"HTTP/1.1 404 Not Found\r\nContent-Length: 18\r\n\r\nResource Not Found").await?;
-                                        }
-                                        Some(callback) => {
-                                            let mut handler = callback;
-                                            let mut callback = handler.lock().await;
-                                            let response: Response = callback(req, Response::new());
-                                            stream.write(response.compile().as_bytes()).await?;
-                                        }
-                                    }
+                            match routes.get(&(method.to_string()+path)) {
+                                Some(handler) => {
+                                    let handler = handler.clone();
+                                    let mut handler = handler.lock().await;
+                                    let response: Response = handler(req, Response::new());
+                                    stream.write(response.compile().as_bytes()).await?;
                                 }
                                 _ => {
                                     stream.write(b"HTTP/1.1 404 Not Found\r\nContent-Length: 18\r\n\r\nResource Not Found").await?;
@@ -101,15 +89,6 @@ async fn on_connection(routes: RouteMaps, mut stream: TcpStream) -> io::Result<(
                             }
                         }
                     }
-                    // Some(req) => {
-                    //     stream.write(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK").await?;
-
-                    // },
-                    // None => {
-                    //     stream.write(b"HTTP/1.1 404 Not Found\r\nContent-Length: 18\r\n\r\nResource Not Found").await?;
-                    // }
-                    // check router for path.
-                    // /404 doesn't exist? we could stop parsing
                 },
                 None => {
                     // must read more and parse again
@@ -122,55 +101,44 @@ async fn on_connection(routes: RouteMaps, mut stream: TcpStream) -> io::Result<(
 
 impl Formica {
     pub fn new (addr: &str) -> Self{
-        println!("create new");
         Self {
             addr: addr.to_string(),
             routes: BTreeMap::new()
         }
     }
     pub async fn listen(&mut self) -> io::Result<()> {
-        println!("Listening to {}", self.addr);
         let address = &self.addr;
         let tcp = TcpListener::bind(address).await.unwrap();
         let mut incoming = tcp.incoming();
 
         while let Some(stream) = incoming.next().await {
-            println!("incoming");
             let stream = stream?;
             task::spawn(on_connection(self.routes.clone(), stream));
         }
         Ok(())
     }
-    pub async fn post(&mut self, path: &str, callback: fn(httparse::Request, Response) -> Response) -> &mut Self{
-        let mut routes = &mut self.routes;
+    pub fn post(&mut self, path: &str, callback: fn(httparse::Request, Response) -> Response) -> &mut Self{
         let handler = Box::new(callback);
-        match routes.get(&path.to_string()){
-            Some(route) => {
-                let route = route.clone();
-                let mut hashmap = route.lock().await;
-                hashmap.insert("POST".to_string(), Mutex::new(handler));
+        let key = ("POST".to_string()+path);
+        match &self.routes.get(&key){
+            Some(handler) => {
+
             },
             None => {
-                let mut hashmap: HashMap<String, RouteHandler> = HashMap::new();
-                hashmap.insert("POST".to_string(), Mutex::new(handler));
-                routes.insert(path.to_string(), Arc::new(Mutex::new(hashmap)));
+                &self.routes.insert(key, Arc::new(Mutex::new(handler)));
             }
         }
         self
     }
-    pub async fn get(&mut self, path: &str, callback: fn(httparse::Request, Response) -> Response) -> &mut Self{
-        let mut routes = &mut self.routes;
+    pub fn get(&mut self, path: &str, callback: fn(httparse::Request, Response) -> Response) -> &mut Self{
         let handler = Box::new(callback);
-        match routes.get(&path.to_string()){
-            Some(route) => {
-                let route = route.clone();
-                let mut hashmap = route.lock().await;
-                hashmap.insert("GET".to_string(), Mutex::new(handler));
+        let key = ("GET".to_string()+path);
+        match &self.routes.get(&key){
+            Some(handler) => {
+
             },
             None => {
-                let mut hashmap: HashMap<String, RouteHandler> = HashMap::new();
-                hashmap.insert("GET".to_string(), Mutex::new(handler));
-                routes.insert(path.to_string(), Arc::new(Mutex::new(hashmap)));
+                &self.routes.insert(key, Arc::new(Mutex::new(handler)));
             }
         }
         self

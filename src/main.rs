@@ -7,11 +7,11 @@ async fn main() -> io::Result<()> {
         .post("/",  |x, mut y | {
             y.body("OK POST".to_string());
             y
-        }).await
+        })
         .get("/",  |x, mut y | {
             y.body("OK GET".to_string());
             y
-        }).await
+        })
         .listen().await?;
     Ok(())
 }
