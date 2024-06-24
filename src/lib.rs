@@ -1,4 +1,7 @@
 use std::collections::{BTreeMap, HashMap};
+use std::io::Read;
+use std::ops::{Deref, DerefMut};
+use std::rc::Rc;
 
 use async_std::{io, task};
 use async_std::net::{TcpListener, TcpStream};
@@ -16,32 +19,26 @@ pub struct Formica{
 }
 
 #[derive(Debug)]
-pub struct Request<'header, 'buf>{
-    pub method: &'buf str,
-    pub pathname:  &'buf str,
+pub struct Request{
+    pub method: String,
+    pub pathname:  String,
     pub query: HashMap<String,String>,
-    pub content: &'buf [u8],
-    pub headers: HashMap<&'header str, &'buf [u8]>
+    pub content: Vec<u8>,
+    pub headers: HashMap<String, String>
 }
 
-impl<'header, 'buf> Drop for Request<'header, 'buf> {
-    fn drop(&mut self) {
-
-    }
-}
-
-impl<'headers, 'buf> From<&httparse::Request<'headers, 'buf>> for Request<'headers, 'buf>  {
-    fn from(value: &httparse::Request<'headers, 'buf>) -> Request<'headers, 'buf> {
+impl From<&httparse::Request<'_, '_>> for Request {
+    fn from(value: &httparse::Request) -> Request {
         let headers_vec = value.headers.to_vec();
-        let mut headers: HashMap<&str, &[u8]> = HashMap::new();
+        let mut headers: HashMap<String, String> = HashMap::new();
         for i in headers_vec.iter() {
-            headers.insert(i.name, i.value);
+            headers.insert(i.name.to_string(), String::from_utf8_lossy(i.value).to_string());
         }
         Request {
-            method: value.method.unwrap(),
-            pathname: value.path.unwrap(),
+            method: value.method.unwrap().to_string(),
+            pathname: value.path.unwrap().to_string(),
             query: Default::default(),
-            content: &[],
+            content: vec![],
             headers,
         }
     }
@@ -84,75 +81,103 @@ impl<'server> Response{
 }
 async fn on_connection(routes: Arc<Mutex<BTreeMap<String, RouteHandler>>>, mut stream: TcpStream) -> io::Result<()> {
     // let mut reader = BufReader::new(&stream);
-    const MAX_BUFFER: usize = 20480;
-    let mut raw = vec![0u8; 0];
+    const MAX_BUFFER: usize = 256;
     let mut buf = [0u8; MAX_BUFFER];
-    let mut headers = [httparse::EMPTY_HEADER; 16];
-    let mut req = httparse::Request::new(&mut headers);
 
-    while let Ok(len) = stream.read(&mut buf).await {
-        if len < MAX_BUFFER {
-            raw.append(&mut buf[..len].to_vec());
-            break
-        }else{
-            raw.append(&mut buf.to_vec())
-        }
-    }
 
-    let result = req.parse(raw.as_ref()).unwrap();
-    if result.is_complete(){
-        match req.path {
-            Some(path) => {
-                match req.method {
-                    None => {}
-                    Some(method) => {
-                        let routes = routes.clone();
-                        let routes = routes.lock().await;
-                        match routes.get(&(method.to_string()+path)) {
-                            Some(handler) => {
-                                let handler = handler.clone();
-                                let mut handler = handler.lock().await;
-                                let mut request = Request::from(&req);
-                                // if method != "GET" {
-                                //     let mut content_length = 0;
-                                //     for header in req.headers.iter() {
-                                //         if "Content-Length" == header.name {
-                                //             match String::from_utf8_lossy(header.value).to_string().parse::<usize>() {
-                                //                 Ok(len) => {
-                                //                     content_length = len;
-                                //                     Some(1);
-                                //                 },
-                                //                 Err(_) => {}
-                                //             }
-                                //             break;
-                                //         }
-                                //     }
-                                //     let slice = raw.len() - content_length;
-                                //     if slice < raw.len() && slice > 0 {
-                                //         request.content = raw[raw.len() - content_length..].as_ref();
-                                //     }
-                                //
-                                // }
+    let mut key = String::new();
+    loop {
+        let size = stream.read(&mut buf).await.or_else(|e| {
+            Err(false)
+        });
+        match size {
+            Ok(size) => {
+                let mut headers = [httparse::EMPTY_HEADER; 16];
+                let mut req = httparse::Request::new(&mut headers);
+                let result = req.parse(&buf[..size]).unwrap().is_complete();
+                if result {
+                    match req.path {
+                        Some(path) => {
+                            match req.method {
+                                None => {
+                                    stream.write_all(b"HTTP/1.1 404 Not Found\r\n\r\n").await?;
+                                    stream.flush().await?;
+                                }
+                                Some(method) => {
+                                    let mut request = Request::from(&req);
+                                    key = format!("{}", method.to_string()+path).to_owned();
+                                    let routes = routes.clone();
+                                    let routes = routes.lock().await;
+                                    match routes.get(&key) {
+                                        Some(handler) => {
+                                            let handler = handler.clone();
+                                            let mut handler = handler.lock().await;
+                                            if method != "GET" {
+                                                let mut content_length = 0;
+                                                for header in req.headers.iter() {
+                                                    if "Content-Length" == header.name {
+                                                        match String::from_utf8_lossy(header.value).to_string().parse::<usize>() {
+                                                            Ok(len) => {
+                                                                content_length = len;
+                                                                Some(1);
+                                                            },
+                                                            Err(_) => {}
+                                                        }
+                                                        break;
+                                                    }
+                                                }
+                                                if size == MAX_BUFFER {
+                                                    let mut raw : Vec<u8> = Vec::from(&buf[..size]);
+                                                    let mut buf = [0u8; MAX_BUFFER];
+                                                    loop {
+                                                        println!("black hole");
+                                                        let Ok(size) = stream.read(&mut buf).await else { break };
+                                                        if size < MAX_BUFFER {
+                                                            raw.extend(&buf[0..size]);
+                                                            break;
+                                                        }
+                                                        raw.extend(&buf);
+                                                        println!("kesekip");
+                                                    }
+                                                    println!("weh");
 
-                                let response: Response = handler(request, Response::new());
-                                stream.write_all(response.compile().as_bytes()).await?;
-                                stream.flush().await?;
-                                drop(req);
-                                drop(raw);
+                                                    let slice = raw.len() - content_length;
+
+                                                    if slice < raw.len() && slice > 0 {
+                                                        request.content = raw[raw.len() - content_length..].to_vec();
+                                                    }
+                                                }
+
+                                            }
+                                            let response: Response = handler(request, Response::new());
+                                            stream.write_all(response.compile().as_bytes()).await?;
+                                            stream.flush().await?;
+                                            drop(routes);
+                                        }
+                                        _ => {
+                                            stream.write(b"HTTP/1.1 404 Not Found\r\nContent-Length: 18\r\n\r\nResource Not Found").await?;
+                                        }
+                                    }
+                                    // break;
+                                }
                             }
-                            _ => {
-                                stream.write(b"HTTP/1.1 404 Not Found\r\nContent-Length: 18\r\n\r\nResource Not Found").await?;
-                            }
+                        },
+                        None => {
+                            // must read more and parse again
                         }
                     }
                 }
-            },
-            None => {
-                // must read more and parse again
+            }
+            Err(_) => {
+                break
             }
         }
-    }
-    drop(routes);
+
+
+    };
+
+
+
     Ok(())
 }
 
@@ -176,10 +201,6 @@ impl Formica {
             let stream = stream?;
             println!("worker {}", c);
             task::spawn(on_connection(Arc::clone(&cloned[c]), stream));
-            c = c+1;
-            if c >= 10 {
-                c = c%10;
-            }
         }
         Ok(())
     }
