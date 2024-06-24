@@ -81,7 +81,7 @@ impl<'server> Response{
 }
 async fn on_connection(routes: Arc<Mutex<BTreeMap<String, RouteHandler>>>, mut stream: TcpStream) -> io::Result<()> {
     // let mut reader = BufReader::new(&stream);
-    const MAX_BUFFER: usize = 256;
+    const MAX_BUFFER: usize = 1024;
     let mut buf = [0u8; MAX_BUFFER];
 
 

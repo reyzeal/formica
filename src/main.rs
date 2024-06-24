@@ -18,7 +18,7 @@ async fn main() -> io::Result<()> {
     // });
     Formica::new("127.0.0.1:9999")
         .post("/",  |x, mut y | {
-            y.body(String::from_utf8_lossy(&x.content).to_string());
+            y.body(format!("bytes len {}", x.content.len()));
             y
         })
         .get("/",  |x, mut y | {
