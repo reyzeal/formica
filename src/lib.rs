@@ -199,8 +199,8 @@ impl Formica {
         let mut c = 0;
         while let Some(stream) = incoming.next().await {
             let stream = stream?;
-            println!("worker {}", c);
             task::spawn(on_connection(Arc::clone(&cloned[c]), stream));
+            c = (c+1) % 10;
         }
         Ok(())
     }
